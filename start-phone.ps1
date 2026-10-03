@@ -1,8 +1,69 @@
 # ============================================================
-# Android Wireless scrcpy - Dynamic Network Version
+# Android Wireless scrcpy Launcher
+# ============================================================
+#
+# Features:
+#   - Detects authorized USB ADB device dynamically
+#   - Handles unauthorized devices
+#   - Removes stale TCP ADB connections
+#   - Enables classic ADB TCP/IP on port 5555
+#   - Dynamically discovers Android IPv4 addresses
+#   - Tests reachability from Windows
+#   - Automatically connects to a reachable IP
+#   - Explicitly selects the wireless ADB device
+#   - Falls back to USB if wireless fails
+#
+# No phone serial numbers or IP addresses are hard-coded.
+#
 # ============================================================
 
+#Requires -Version 5.1
+
 $ErrorActionPreference = "Continue"
+
+
+# ------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------
+
+function Write-Info {
+    param([string]$Message)
+
+    Write-Host $Message -ForegroundColor Cyan
+}
+
+function Write-Success {
+    param([string]$Message)
+
+    Write-Host $Message -ForegroundColor Green
+}
+
+function Write-WarningMessage {
+    param([string]$Message)
+
+    Write-Host $Message -ForegroundColor Yellow
+}
+
+function Write-ErrorMessage {
+    param([string]$Message)
+
+    Write-Host $Message -ForegroundColor Red
+}
+
+function Fail-Script {
+    param([string]$Message)
+
+    Write-Host ""
+    Write-ErrorMessage "[ERROR] $Message"
+    Write-Host ""
+
+    exit 1
+}
+
+
+# ------------------------------------------------------------
+# Banner
+# ------------------------------------------------------------
 
 Write-Host ""
 Write-Host "============================================" -ForegroundColor Cyan
@@ -11,178 +72,353 @@ Write-Host "       Dynamic Network Detection" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 
+
 # ------------------------------------------------------------
-# Check required programs
+# Check dependencies
 # ------------------------------------------------------------
 
 if (-not (Get-Command adb -ErrorAction SilentlyContinue)) {
-    Write-Host "[ERROR] adb.exe not found." -ForegroundColor Red
-    exit 1
+
+    Fail-Script `
+        "adb.exe was not found in PATH. Install Android SDK Platform-Tools."
 }
 
 if (-not (Get-Command scrcpy -ErrorAction SilentlyContinue)) {
-    Write-Host "[ERROR] scrcpy.exe not found." -ForegroundColor Red
-    exit 1
+
+    Fail-Script `
+        "scrcpy.exe was not found in PATH. Install scrcpy."
 }
 
+
 # ------------------------------------------------------------
-# Find USB Android device
+# Detect authorized USB devices
 # ------------------------------------------------------------
 
-Write-Host "[1/7] Detecting Android device..." -ForegroundColor Yellow
+Write-Info "[1/7] Detecting Android ADB devices..."
 
-$devices = adb devices
+$adbDevicesOutput = @(adb devices 2>$null)
 
-$usbDevice = $null
+$authorizedUsbDevices = @()
+$unauthorizedUsbDevices = @()
+$offlineUsbDevices = @()
 
-foreach ($line in $devices) {
+foreach ($line in $adbDevicesOutput) {
 
-    if ($line -match "^(\S+)\s+device$") {
+    if ($line -match "^(\S+)\s+(\S+)$") {
 
         $serial = $Matches[1]
+        $state  = $Matches[2]
 
-        # Ignore TCP/IP devices
-        if ($serial -notmatch ":") {
-            $usbDevice = $serial
-            break
-        }
-    }
-}
+        # TCP/IP devices contain ":"
+        # Physical USB devices normally do not.
+        $isTcpDevice = $serial -match ":"
 
-if (-not $usbDevice) {
-    Write-Host ""
-    Write-Host "[ERROR] No authorized USB Android device found." -ForegroundColor Red
-    Write-Host ""
-    Write-Host "Connect the phone through USB and make sure ADB is authorized."
-    exit 1
-}
+        if (-not $isTcpDevice) {
 
-Write-Host "[OK] USB device: $usbDevice" -ForegroundColor Green
+            switch ($state) {
 
-# ------------------------------------------------------------
-# Clean stale ADB TCP connections
-# ------------------------------------------------------------
+                "device" {
+                    $authorizedUsbDevices += $serial
+                }
 
-Write-Host ""
-Write-Host "[2/7] Cleaning old wireless ADB connections..." -ForegroundColor Yellow
+                "unauthorized" {
+                    $unauthorizedUsbDevices += $serial
+                }
 
-adb disconnect | Out-Null
-
-Start-Sleep -Seconds 1
-
-# ------------------------------------------------------------
-# Enable TCP/IP ADB
-# ------------------------------------------------------------
-
-Write-Host ""
-Write-Host "[3/7] Enabling ADB TCP/IP mode..." -ForegroundColor Yellow
-
-$tcpResult = adb -s $usbDevice tcpip 5555
-
-Write-Host $tcpResult
-
-Start-Sleep -Seconds 3
-
-# ------------------------------------------------------------
-# Get Android network interfaces
-# ------------------------------------------------------------
-
-Write-Host ""
-Write-Host "[4/7] Detecting phone network addresses..." -ForegroundColor Yellow
-
-$routeOutput = adb -s $usbDevice shell ip route
-
-Write-Host ""
-Write-Host "Android routing table:"
-Write-Host $routeOutput
-
-# Get all IPv4 addresses from Android
-$ipOutput = adb -s $usbDevice shell ip -4 addr
-
-$phoneIPs = @()
-
-foreach ($line in $ipOutput) {
-
-    if ($line -match "inet\s+(\d+\.\d+\.\d+\.\d+)/\d+") {
-
-        $ip = $Matches[1]
-
-        # Ignore loopback
-        if ($ip -notlike "127.*") {
-
-            # Ignore obvious cellular/virtual addresses
-            if (
-                $ip -notlike "169.254.*" -and
-                $ip -notlike "10.0.2.*"
-            ) {
-                $phoneIPs += $ip
+                "offline" {
+                    $offlineUsbDevices += $serial
+                }
             }
         }
     }
 }
 
-if ($phoneIPs.Count -eq 0) {
+
+# ------------------------------------------------------------
+# Handle unauthorized device
+# ------------------------------------------------------------
+
+if ($unauthorizedUsbDevices.Count -gt 0) {
 
     Write-Host ""
-    Write-Host "[ERROR] Could not find a usable IPv4 address." -ForegroundColor Red
+
+    Write-ErrorMessage "============================================"
+    Write-ErrorMessage "          DEVICE NOT AUTHORIZED"
+    Write-ErrorMessage "============================================"
 
     Write-Host ""
-    Write-Host "Android addresses:"
-    Write-Host $ipOutput
+
+    foreach ($device in $unauthorizedUsbDevices) {
+
+        Write-Host "Unauthorized device:" -ForegroundColor Yellow
+        Write-Host "  $device"
+    }
+
+    Write-Host ""
+
+    Write-Host "USB debugging is enabled, but this computer"
+    Write-Host "has not been authorized by Android."
+    Write-Host ""
+
+    Write-Host "Unlock the phone and accept the Android dialog:"
+    Write-Host ""
+
+    Write-Host '    "Allow USB debugging?"' -ForegroundColor Yellow
+
+    Write-Host ""
+
+    Write-Host "After authorization, run the launcher again."
+    Write-Host ""
+
+    Write-Host "For a broken display, an OTG mouse or another"
+    Write-Host "supported external-input/display method may be"
+    Write-Host "required for the initial authorization."
+    Write-Host ""
 
     exit 1
 }
 
+
+# ------------------------------------------------------------
+# Handle no USB device
+# ------------------------------------------------------------
+
+if ($authorizedUsbDevices.Count -eq 0) {
+
+    Fail-Script `
+        "No authorized USB Android device was found. Connect and authorize the phone first."
+}
+
+
+# ------------------------------------------------------------
+# Handle multiple USB devices
+# ------------------------------------------------------------
+
+if ($authorizedUsbDevices.Count -gt 1) {
+
+    Write-Host ""
+
+    Write-ErrorMessage "============================================"
+    Write-ErrorMessage "       MULTIPLE USB DEVICES DETECTED"
+    Write-ErrorMessage "============================================"
+
+    Write-Host ""
+
+    foreach ($device in $authorizedUsbDevices) {
+
+        Write-Host "  $device"
+    }
+
+    Write-Host ""
+
+    Write-Host "Disconnect the extra USB devices and retry."
+    Write-Host ""
+
+    exit 1
+}
+
+
+$usbDevice = $authorizedUsbDevices[0]
+
+Write-Success "[OK] USB device: $usbDevice"
+
+
+# ------------------------------------------------------------
+# Remove stale TCP ADB devices
+# ------------------------------------------------------------
+
 Write-Host ""
-Write-Host "Candidate phone IPs:" -ForegroundColor Cyan
+Write-Info "[2/7] Cleaning stale wireless ADB connections..."
+
+adb disconnect | Out-Null
+
+Start-Sleep -Seconds 1
+
+
+# ------------------------------------------------------------
+# Enable ADB TCP/IP
+# ------------------------------------------------------------
+
+Write-Host ""
+Write-Info "[3/7] Enabling ADB TCP/IP mode on port 5555..."
+
+$tcpResult = @(adb -s $usbDevice tcpip 5555 2>&1)
+
+if ($tcpResult.Count -gt 0) {
+
+    foreach ($line in $tcpResult) {
+
+        Write-Host $line
+    }
+}
+
+Start-Sleep -Seconds 3
+
+
+# ------------------------------------------------------------
+# Discover Android IPv4 addresses
+# ------------------------------------------------------------
+
+Write-Host ""
+Write-Info "[4/7] Detecting Android IPv4 addresses..."
+
+$androidIpOutput = @(
+    adb -s $usbDevice shell ip -4 addr 2>$null
+)
+
+if ($androidIpOutput.Count -eq 0) {
+
+    Write-Host ""
+    Write-WarningMessage "Android returned no IPv4 address information."
+
+    Write-Host ""
+    Write-Host "Trying routing table instead..."
+
+    $routeOutput = @(
+        adb -s $usbDevice shell ip route 2>$null
+    )
+
+    if ($routeOutput.Count -eq 0) {
+
+        Fail-Script `
+            "Could not obtain Android network information."
+    }
+
+    Write-Host ""
+    Write-Host "Android route table:"
+    $routeOutput | ForEach-Object {
+        Write-Host $_
+    }
+
+    Fail-Script `
+        "No usable IPv4 address could be determined."
+}
+
+
+# ------------------------------------------------------------
+# Parse IPv4 addresses
+# ------------------------------------------------------------
+
+$phoneIPs = New-Object System.Collections.Generic.List[string]
+
+foreach ($line in $androidIpOutput) {
+
+    if ($line -match `
+        "inet\s+(\d{1,3}(?:\.\d{1,3}){3})/\d+") {
+
+        $ip = $Matches[1]
+
+        # Exclude loopback
+        if ($ip -like "127.*") {
+            continue
+        }
+
+        # Exclude link-local
+        if ($ip -like "169.254.*") {
+            continue
+        }
+
+        # Exclude common Android emulator-only address
+        if ($ip -like "10.0.2.*") {
+            continue
+        }
+
+        # Avoid duplicates
+        if (-not $phoneIPs.Contains($ip)) {
+
+            [void]$phoneIPs.Add($ip)
+        }
+    }
+}
+
+
+# ------------------------------------------------------------
+# No IPs found
+# ------------------------------------------------------------
+
+if ($phoneIPs.Count -eq 0) {
+
+    Write-Host ""
+    Write-Host "Android network output:"
+    $androidIpOutput | ForEach-Object {
+        Write-Host $_
+    }
+
+    Fail-Script `
+        "No usable IPv4 address was found on the Android device."
+}
+
+
+# ------------------------------------------------------------
+# Show candidate addresses
+# ------------------------------------------------------------
+
+Write-Host ""
+
+Write-Host "Candidate Android IPv4 addresses:" `
+    -ForegroundColor Cyan
 
 foreach ($ip in $phoneIPs) {
+
     Write-Host "  $ip"
 }
 
+
 # ------------------------------------------------------------
-# Find the IP reachable from Windows
+# Test TCP port 5555
 # ------------------------------------------------------------
 
 Write-Host ""
-Write-Host "[5/7] Testing network connectivity..." -ForegroundColor Yellow
+Write-Info "[5/7] Testing TCP/5555 reachability..."
 
 $workingIP = $null
 
 foreach ($ip in $phoneIPs) {
 
     Write-Host ""
-    Write-Host "Testing $ip : 5555 ..."
+    Write-Host "Testing $ip`:5555 ..."
 
-    $test = Test-NetConnection `
-        -ComputerName $ip `
-        -Port 5555 `
-        -InformationLevel Quiet `
-        -WarningAction SilentlyContinue
+    try {
 
-    if ($test) {
+        $reachable = Test-NetConnection `
+            -ComputerName $ip `
+            -Port 5555 `
+            -InformationLevel Quiet `
+            -WarningAction SilentlyContinue
 
-        Write-Host "[OK] Port 5555 reachable on $ip" -ForegroundColor Green
+    }
+    catch {
+
+        $reachable = $false
+    }
+
+    if ($reachable) {
+
+        Write-Success "[OK] TCP/5555 reachable on $ip"
 
         $workingIP = $ip
+
         break
     }
-    else {
 
-        Write-Host "[NO] $ip is not reachable on port 5555" -ForegroundColor DarkYellow
-    }
+    Write-WarningMessage "[NO] TCP/5555 not reachable on $ip"
 }
 
+
 # ------------------------------------------------------------
-# If port isn't reachable, try ADB connection anyway
+# If Windows test fails, try adb connect anyway
 # ------------------------------------------------------------
 
 if (-not $workingIP) {
 
     Write-Host ""
-    Write-Host "No reachable TCP/5555 address detected." -ForegroundColor Yellow
+
+    Write-WarningMessage `
+        "No candidate passed the Windows TCP test."
+
     Write-Host ""
-    Write-Host "Attempting ADB connection to each candidate..." -ForegroundColor Yellow
+    Write-WarningMessage `
+        "Trying adb connect directly against each candidate..."
 
     foreach ($ip in $phoneIPs) {
 
@@ -191,98 +427,171 @@ if (-not $workingIP) {
         Write-Host ""
         Write-Host "Trying $target ..."
 
-        $result = adb connect $target
+        $connectOutput = @(
+            adb connect $target 2>&1
+        )
 
-        Write-Host $result
+        foreach ($line in $connectOutput) {
 
-        if ($result -match "connected to") {
+            Write-Host $line
+        }
+
+        $connectText = $connectOutput -join " "
+
+        if ($connectText -match `
+            "connected to|already connected") {
 
             $workingIP = $ip
+
             break
         }
     }
 }
 
+
 # ------------------------------------------------------------
-# Wireless connection failed
+# Wireless failed
 # ------------------------------------------------------------
 
 if (-not $workingIP) {
 
     Write-Host ""
-    Write-Host "============================================" -ForegroundColor Red
-    Write-Host " Wireless ADB connection failed" -ForegroundColor Red
-    Write-Host "============================================" -ForegroundColor Red
+
+    Write-ErrorMessage "============================================"
+    Write-ErrorMessage "       WIRELESS ADB CONNECTION FAILED"
+    Write-ErrorMessage "============================================"
 
     Write-Host ""
+
     Write-Host "Possible causes:"
     Write-Host ""
-    Write-Host "1. Phone and PC are on different networks."
-    Write-Host "2. Windows hotspot/client isolation is blocking traffic."
-    Write-Host "3. Android is not listening on TCP port 5555."
-    Write-Host "4. Firewall is blocking TCP/5555."
-    Write-Host "5. The phone changed Wi-Fi networks."
+    Write-Host "  1. Phone and PC are on different networks."
+    Write-Host "  2. Windows Mobile Hotspot blocks peer traffic."
+    Write-Host "  3. Android is not reachable on TCP/5555."
+    Write-Host "  4. Windows Firewall is blocking the connection."
+    Write-Host "  5. Android requires Wireless Debugging pairing."
+    Write-Host "  6. The phone is connected through another interface."
+    Write-Host "  7. The Wi-Fi network uses client isolation."
     Write-Host ""
 
-    Write-Host "Falling back to USB scrcpy..." -ForegroundColor Yellow
+    Write-WarningMessage `
+        "Falling back to USB scrcpy..."
 
-    # USB encoder workaround
-    scrcpy -d --video-codec=h264
+    Write-Host ""
+
+    # Explicitly select the USB device.
+    scrcpy `
+        -s $usbDevice `
+        --video-codec=h264
 
     exit 0
 }
 
+
 # ------------------------------------------------------------
-# Connect to working address
+# Build TCP serial
 # ------------------------------------------------------------
 
 $wifiDevice = "${workingIP}:5555"
 
 Write-Host ""
-Write-Host "[6/7] Connecting to $wifiDevice..." -ForegroundColor Yellow
+Write-Info "[6/7] Connecting to $wifiDevice..."
 
+
+# Clean stale connection first
 adb disconnect | Out-Null
 
 Start-Sleep -Seconds 1
 
-$connection = adb connect $wifiDevice
 
-Write-Host $connection
+# Connect
+$connectionOutput = @(
+    adb connect $wifiDevice 2>&1
+)
+
+foreach ($line in $connectionOutput) {
+
+    Write-Host $line
+}
 
 Start-Sleep -Seconds 2
 
-# Verify
-$adbList = adb devices
 
-if ($adbList -match [regex]::Escape($wifiDevice) + "\s+device") {
+# ------------------------------------------------------------
+# Verify the exact wireless device
+# ------------------------------------------------------------
 
-    Write-Host ""
-    Write-Host "[OK] Wireless ADB connected!" -ForegroundColor Green
-    Write-Host "Device: $wifiDevice" -ForegroundColor Green
+$finalDevices = @(adb devices 2>$null)
 
+$wirelessVerified = $false
+
+foreach ($line in $finalDevices) {
+
+    if (
+        $line -match `
+        ("^" + [regex]::Escape($wifiDevice) + "\s+device$")
+    ) {
+
+        $wirelessVerified = $true
+
+        break
+    }
 }
-else {
+
+
+# ------------------------------------------------------------
+# Wireless verification failed
+# ------------------------------------------------------------
+
+if (-not $wirelessVerified) {
 
     Write-Host ""
-    Write-Host "[ERROR] Wireless ADB connection could not be verified." -ForegroundColor Red
+
+    Write-ErrorMessage `
+        "[ERROR] Wireless ADB connection could not be verified."
 
     Write-Host ""
-    Write-Host "Falling back to USB..."
 
-    scrcpy -d --video-codec=h264
+    Write-WarningMessage `
+        "Falling back to USB scrcpy..."
+
+    Write-Host ""
+
+    scrcpy `
+        -s $usbDevice `
+        --video-codec=h264
 
     exit 0
 }
 
+
 # ------------------------------------------------------------
-# Launch scrcpy
+# Launch scrcpy over Wi-Fi
 # ------------------------------------------------------------
 
 Write-Host ""
-Write-Host "[7/7] Starting scrcpy over Wi-Fi..." -ForegroundColor Yellow
+
+Write-Success "[OK] Wireless ADB connected!"
+Write-Success "     Device: $wifiDevice"
+
 Write-Host ""
 
-scrcpy -s $wifiDevice --video-codec=h264
+Write-Info "[7/7] Starting scrcpy over Wi-Fi..."
 
 Write-Host ""
+
+# Explicitly select the wireless transport.
+# This prevents USB/TCP duplicate-device errors.
+scrcpy `
+    -s $wifiDevice `
+    --video-codec=h264
+
+
+# ------------------------------------------------------------
+# End
+# ------------------------------------------------------------
+
+Write-Host ""
+Write-Host "============================================"
 Write-Host "scrcpy closed."
+Write-Host "============================================"

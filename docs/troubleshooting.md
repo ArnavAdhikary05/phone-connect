@@ -592,3 +592,326 @@ Do not post:
 - Wi-Fi passwords
 - personal IP information if it is not necessary
 - device identifiers if you do not want them public
+
+---
+
+## 21. USB debugging is enabled but no authorization popup appears
+
+### Symptom
+
+You run:
+
+```powershell
+adb devices
+```
+
+and Android appears as:
+
+```text
+USB_SERIAL    unauthorized
+```
+
+but the phone does not show the `Allow USB debugging?` authorization dialog.
+
+### Why this happens
+
+Enabling **USB debugging** only enables the ADB interface. A new computer normally still needs to be authorized by the Android device.
+
+ADB authorization is associated with the specific computer/ADB key, so another computer may need to be authorized separately.
+
+### Try these steps
+
+#### 1. Unlock the phone
+
+Keep the phone unlocked while connecting the USB cable.
+
+Disconnect and reconnect the cable, then run:
+
+```powershell
+adb kill-server
+adb start-server
+adb devices
+```
+
+#### 2. Check the USB connection mode
+
+On Android, open the USB notification and, where available, choose a data mode such as:
+
+```text
+File Transfer
+```
+
+instead of charging-only mode.
+
+Then reconnect the cable.
+
+#### 3. Revoke previous USB debugging authorizations
+
+On the phone, open:
+
+```text
+Settings
+→ Developer options
+→ Revoke USB debugging authorizations
+```
+
+Then:
+
+1. Turn USB debugging OFF.
+2. Turn USB debugging ON again.
+3. Reconnect the USB cable.
+4. Run:
+
+```powershell
+adb devices
+```
+
+The authorization dialog should normally appear for an untrusted computer.
+
+#### 4. Try another USB cable or USB port
+
+Try a known-good data cable and another USB port. Avoid USB hubs during initial setup when possible.
+
+#### 5. Check the computer's ADB keys
+
+On Windows:
+
+```powershell
+dir "$env:USERPROFILE\.android"
+```
+
+You may see:
+
+```text
+adbkey
+adbkey.pub
+```
+
+`adbkey` is the private ADB key.
+
+**Never publish or share `adbkey`.**
+
+Do not delete the keys as a first troubleshooting step unless you understand that doing so can require re-authorizing devices.
+
+### If the phone has a broken screen
+
+If the Android screen is broken and the device has never authorized this computer, the authorization dialog may be impossible to confirm normally.
+
+Depending on the phone and Android version, possible approaches include:
+
+- using a working touchscreen
+- connecting an OTG mouse
+- using an external display/input method if supported
+- using a computer that was already authorized
+- using a suitable recovery/debugging environment
+
+The exact solution is device-specific.
+
+### Important
+
+Do not assume that:
+
+```text
+USB debugging = ON
+```
+
+means:
+
+```text
+Every computer = authorized
+```
+
+These are separate states.
+
+Expected progression:
+
+```text
+USB debugging enabled
+        ↓
+Computer connects
+        ↓
+unauthorized
+        ↓
+Android authorization dialog
+        ↓
+User accepts
+        ↓
+device
+```
+
+Expected final result:
+
+```text
+USB_SERIAL    device
+```
+
+Once the device reaches the `device` state, the launcher can use it.
+
+---
+
+## 22. `adb` commands entered inside the Android shell do not work
+
+If your prompt looks like:
+
+```text
+kali:/ #
+```
+
+you are already inside the Android shell.
+
+Commands such as:
+
+```text
+adb devices
+adb shell
+adb connect
+```
+
+are normally run from the PC, not from inside the Android shell.
+
+From the PC:
+
+```powershell
+adb devices
+adb shell
+```
+
+Inside Android, use Android/Linux commands directly, for example:
+
+```sh
+ip route
+ip -4 addr
+ss -lnt
+settings get global http_proxy
+```
+
+For example, this is correct from the Android shell:
+
+```sh
+settings get global http_proxy
+```
+
+while this is normally incorrect from inside Android:
+
+```sh
+adb shell settings get global http_proxy
+```
+
+---
+
+## 23. Checking for a local proxy such as `127.0.0.1:9050`
+
+If an application reports an error similar to:
+
+```text
+127.0.0.1:9050
+```
+
+but Android's global proxy settings are empty, the proxy may be configured inside the application itself.
+
+Check Android's global proxy settings:
+
+```sh
+settings get global http_proxy
+settings get global global_http_proxy_host
+settings get global global_http_proxy_port
+settings list global | grep -i proxy
+```
+
+Check whether anything is listening on port 9050:
+
+```sh
+ss -lnt | grep 9050
+```
+
+If there is no output, nothing is currently listening on TCP port 9050.
+
+For an F-Droid-based client, also check the application's own settings for proxy/Tor/SOCKS configuration.
+
+Do not remove networking rules or proxy configuration blindly; first determine which component created the configuration.
+
+---
+
+## 24. F-Droid/NetHunter Store reports "No mirrors available"
+
+If the application reports:
+
+```text
+Error getting F-Droid index file
+No mirrors available
+```
+
+first verify that the phone itself has working network and DNS access.
+
+From Android:
+
+```sh
+ping -c 3 8.8.8.8
+ping -c 3 f-droid.org
+```
+
+Then, if available:
+
+```sh
+curl -I https://f-droid.org
+```
+
+or:
+
+```sh
+wget -S --spider https://f-droid.org
+```
+
+Interpretation:
+
+- If IP connectivity and HTTPS both work, investigate the F-Droid/NetHunter Store repository configuration or client.
+- If `8.8.8.8` works but the domain fails, investigate DNS.
+- If both fail, investigate the Android network/VPN/firewall configuration.
+
+Also check whether the application has its own proxy configuration.
+
+---
+
+## 25. ADB TCP/5555 is listening but Windows still cannot connect
+
+On Android:
+
+```sh
+ss -lnt | grep 5555
+```
+
+A listener similar to:
+
+```text
+*:5555
+```
+
+or:
+
+```text
+[::]:5555
+```
+
+indicates that ADB is listening.
+
+From Windows:
+
+```powershell
+Test-NetConnection PHONE_IP -Port 5555
+```
+
+If Android is listening but Windows reports:
+
+```text
+TcpTestSucceeded : False
+```
+
+the problem is likely between the two hosts, such as:
+
+- different networks
+- routing
+- hotspot isolation
+- firewall rules
+- VPN/network-interface selection
+
+The presence of a listener on Android does not by itself prove that Windows can reach it.
